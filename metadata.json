@@ -1,0 +1,5 @@
+{
+  "name": "WPF Low-Code Generator",
+  "description": "Generates C# .NET 8 WPF boilerplate code for PLC communication and SQL storage based on Excel definitions.",
+  "requestFramePermissions": []
+}
