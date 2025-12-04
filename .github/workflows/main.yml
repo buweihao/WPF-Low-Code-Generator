@@ -1,0 +1,28 @@
+name: 只编译不部署
+on: [push, workflow_dispatch] # 允许代码提交触发，也允许手动按钮触发
+
+jobs:
+  build-my-react:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 2. 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 3. 安装依赖并编译
+        # 如果你的项目不是用 npm，是用 yarn，请把下面改成 yarn install && yarn build
+        run: |
+          npm install
+          npm run build
+
+      - name: 4. 打包并上传结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: 我的编译结果(下载我)
+          # 【注意】如果你用的是 Vite，下面写 dist
+          # 【注意】如果你用的是 CRA (Create React App)，下面写 build
+          path: dist/
