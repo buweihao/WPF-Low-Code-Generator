@@ -1,0 +1,43 @@
+name: Build and Download Artifact
+
+# 触发条件：推送到 main 分支，或者手动在 GitHub 界面触发
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: 
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 拉取代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. 配置 Node.js 环境
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # 建议使用稳定版本
+          cache: 'npm'       # 开启缓存，加快安装速度
+
+      # 3. 安装依赖
+      - name: Install dependencies
+        run: npm ci
+        # 如果你使用 yarn，请用: yarn install --frozen-lockfile
+        # 如果你使用 pnpm，需要先安装 pnpm setup action
+
+      # 4. 执行构建 (编译 TypeScript -> JS/CSS)
+      - name: Build project
+        run: npm run build
+
+      # 5. 上传构建产物 (关键步骤)
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: my-react-app-build  # 下载时的压缩包名称
+          path: dist/                # 构建输出目录
+          # 注意：Vite 默认输出到 'dist/'，Create React App 默认输出到 'build/'
+          # 请根据你的实际情况修改上面的 path
+          retention-days: 5          # 文件保留天数
