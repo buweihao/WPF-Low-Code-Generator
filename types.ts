@@ -18,7 +18,7 @@ export interface PointDefinition {
 export interface SheetData {
   name: string;
   points: PointDefinition[];
-  deviceInfo?: DeviceConfig; // Linked from IP_Port sheet
+  // deviceInfo removed because mapping is now Sheet + ModuleIndex -> DeviceConfig
 }
 
 export interface AppState {

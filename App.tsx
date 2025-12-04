@@ -40,38 +40,33 @@ const App: React.FC = () => {
       
       const rawIpPort = XLSX.utils.sheet_to_json<any>(workbook.Sheets['IP_Port']);
       // Sanitize IP_Port data (trim whitespace)
-    const ipPortData: DeviceConfig[] = rawIpPort.map(row => ({
-    // 1. Excel 表头是 "Device"，不是 "DeviceName"
-    DeviceName: String(row.Device || '').trim(), 
-    
-    IP: String(row.IP || '').trim(),
-    
-    // 2. Excel 表头是 "PORT" (全大写)，建议做个兼容处理
-    Port: Number(row.PORT || row.Port) || 502 
-})).filter(d => d.DeviceName); // 现在 DeviceName 有值了，就不会被过滤了
+      const ipPortData: DeviceConfig[] = rawIpPort.map(row => ({
+        DeviceName: String(row.Device || '').trim(), 
+        IP: String(row.IP || '').trim(),
+        Port: Number(row.PORT || row.Port) || 502 
+      })).filter(d => d.DeviceName); 
+
+      // VALIDATION: Check for unique IPs
+      const ips = new Set<string>();
+      for (const d of ipPortData) {
+          if (ips.has(d.IP)) {
+              throw new Error(`IP冲突错误: IP地址 ${d.IP} 在 IP_Port 表中被重复定义。每个设备的IP必须唯一。`);
+          }
+          ips.add(d.IP);
+      }
 
       addLog(`发现 ${ipPortData.length} 个设备在 IP_Port 表中。`);
 
-      // 2. Parse Modules
+      // 2. Parse Modules (Sheets)
       const sheets: SheetData[] = [];
       const allPropNames = new Set<string>();
 
       for (const originalSheetName of workbook.SheetNames) {
-        // Trim sheet name for comparison
         const sheetName = originalSheetName.trim();
-        
         if (sheetName === 'IP_Port') continue;
-
-        // Check if device exists using trimmed name
-        const matchedDevice = ipPortData.find(d => d.DeviceName === sheetName);
-        
-        if (!matchedDevice) {
-             addLog(`警告: 工作表 ${sheetName} 未在 IP_Port 设备列表中找到。映射可能会失败。`);
-        }
 
         const rawPoints = XLSX.utils.sheet_to_json<any>(workbook.Sheets[originalSheetName]);
         const points: PointDefinition[] = rawPoints.map((row: any) => {
-            // Validate unique property name
             if (allPropNames.has(row.PropertyName)) {
                 throw new Error(`在表 ${sheetName} 中发现重复的属性名: ${row.PropertyName}`);
             }
@@ -80,7 +75,6 @@ const App: React.FC = () => {
             return {
                 PropertyName: row.PropertyName,
                 KeyName: row.KeyName,
-                // Explicitly cast addresses to String to handle numeric values from Excel
                 ValueAddress: String(row.ValueAddress || ''),
                 Type: row.Type,
                 Length: Number(row.Length),
@@ -105,11 +99,22 @@ const App: React.FC = () => {
         });
 
         sheets.push({
-            name: sheetName, // Use the trimmed name
-            points,
-            deviceInfo: matchedDevice
+            name: sheetName,
+            points
         });
         addLog(`已解析工作表 ${sheetName}: ${points.length} 个点位。`);
+      }
+
+      // VALIDATION: Check if all expected devices exist in IP_Port
+      // For every module index (1..Max) and every Sheet, there must be a device named "{Sheet}_{Mx}"
+      for (let m = 1; m <= state.maxModules; m++) {
+          for (const sheet of sheets) {
+              const expectedDeviceName = `${sheet.name}_M${m}`;
+              const exists = ipPortData.find(d => d.DeviceName === expectedDeviceName);
+              if (!exists) {
+                  throw new Error(`配置缺失: 未在 IP_Port 表中找到设备 "${expectedDeviceName}" (对应工作表 ${sheet.name}, 模组 ${m})。`);
+              }
+          }
       }
 
       setState(prev => ({
@@ -149,7 +154,7 @@ const App: React.FC = () => {
         addLog("已生成 SQLTable_Auto.cs");
 
         // 4. Global_Auto.cs
-        const globalAuto = generateGlobalAuto(state.sheets, state.maxModules);
+        const globalAuto = generateGlobalAuto(state.sheets, state.maxModules, state.devices);
         zip.file("Global_Auto.cs", globalAuto);
         addLog("已生成 Global_Auto.cs");
 
