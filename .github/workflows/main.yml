@@ -22,7 +22,7 @@ jobs:
       - name: 4. 打包并上传结果
         uses: actions/upload-artifact@v4
         with:
-          name: 我的编译结果(下载我)
+          name: build-output
           # 【注意】如果你用的是 Vite，下面写 dist
           # 【注意】如果你用的是 CRA (Create React App)，下面写 build
           path: dist/
