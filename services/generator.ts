@@ -154,7 +154,7 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`        public bool IsRecording { get; private set; }`);
   sb.push(``);
   sb.push(`        private ConcurrentQueue<string> _logQueue = new ConcurrentQueue<string>();`);
-  sb.push(`        private class LogMetadata { public string KeyName; public string Type; public PropertyInfo Info; }`);
+  sb.push(`        private class LogMetadata { public string KeyName; public string Address; public string Type; public PropertyInfo Info; }`);
   sb.push(`        private Dictionary<string, LogMetadata> _logMetadata = new Dictionary<string, LogMetadata>();`);
   sb.push(``);
   sb.push(`        private async Task ProcessLogQueue()`);
@@ -202,7 +202,9 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
                const propName = `${p.PropertyName}_M${m}`;
                // KeyName可能包含引号，简单转义
                const safeKeyName = p.KeyName ? p.KeyName.replace(/"/g, '\\"') : "";
-               sb.push(`            _logMetadata["${propName}"] = new LogMetadata { KeyName = "${safeKeyName}", Type = "${p.Type}", Info = this.GetType().GetProperty("${propName}") };`);
+               // Address 直接使用 Excel 中的原始值
+               const address = p.ValueAddress || "";
+               sb.push(`            _logMetadata["${propName}"] = new LogMetadata { KeyName = "${safeKeyName}", Address = "${address}", Type = "${p.Type}", Info = this.GetType().GetProperty("${propName}") };`);
           });
       });
   }
@@ -296,7 +298,7 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`                    var val = meta.Info.GetValue(this);`);
   sb.push(`                    // 处理KeyName包含逗号的情况`);
   sb.push(`                    string safeKey = (meta.KeyName != null && meta.KeyName.Contains(",")) ? $"\\"{meta.KeyName}\\"" : meta.KeyName;`);
-  sb.push(`                    _logQueue.Enqueue($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff},{safeKey},{meta.Type},{val}");`);
+  sb.push(`                    _logQueue.Enqueue($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff},{safeKey},{meta.Address},{meta.Type},{val}");`);
   sb.push(`                } catch {}`);
   sb.push(`            }`);
   sb.push(``);
