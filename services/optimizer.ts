@@ -12,15 +12,17 @@ export interface RequestBlock {
     IncludedTags: TagInfo[];
 }
 
-export const optimizeRequests = (tags: TagInfo[]): RequestBlock[] => {
+export const optimizeRequests = (tags: TagInfo[], maxGap: number = 20, maxBatchSize: number = 100): RequestBlock[] => {
     if (!tags || tags.length === 0) return [];
 
     // 1. Sort by address
     tags.sort((a, b) => a.Address - b.Address);
 
     const blocks: RequestBlock[] = [];
-    const MAX_GAP = 20;
-    const MAX_BATCH_SIZE = 100;
+    
+    // Ensure inputs are valid
+    const SAFE_MAX_GAP = Math.max(0, maxGap);
+    const SAFE_BATCH_SIZE = Math.max(1, maxBatchSize);
 
     let currentBlock: RequestBlock = {
         StartAddress: tags[0].Address,
@@ -33,11 +35,17 @@ export const optimizeRequests = (tags: TagInfo[]): RequestBlock[] => {
         
         const currentEnd = currentBlock.StartAddress + currentBlock.Length;
         const gap = tag.Address - currentEnd;
-        const newLength = (tag.Address + tag.Length) - currentBlock.StartAddress;
+        
+        // Calculate the end of the current tag relative to the block start
+        const tagEndRelative = (tag.Address + tag.Length) - currentBlock.StartAddress;
+        
+        // We must ensure the block is large enough to cover both the existing range AND the new tag.
+        // If the new tag is "nested" inside the existing range, the length should not shrink.
+        const newTotalLength = Math.max(currentBlock.Length, tagEndRelative);
 
         // Merge if gap is small and total size is within limit
-        if (gap <= MAX_GAP && newLength <= MAX_BATCH_SIZE) {
-            currentBlock.Length = newLength;
+        if (gap <= SAFE_MAX_GAP && newTotalLength <= SAFE_BATCH_SIZE) {
+            currentBlock.Length = newTotalLength;
             currentBlock.IncludedTags.push(tag);
         } else {
             blocks.push(currentBlock);

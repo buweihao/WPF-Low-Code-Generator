@@ -56,7 +56,9 @@ export const generateGlobalAuto = (sheets: SheetData[], maxModules: number, devi
       const pointsByPeriod = new Map<number, any>();
       sheet.points.forEach(p => { if(p.Period !== 0) pointsByPeriod.set(p.Period, true); });
       pointsByPeriod.forEach((_, period) => {
-          tableNames.add(`${sheet.name}_PeriodAbs_${Math.abs(period)}`);
+          // Sanitize period for class name matches sqlTable.ts
+          const safePeriod = Math.abs(period).toString().replace('.', '_');
+          tableNames.add(`${sheet.name}_PeriodAbs_${safePeriod}`);
       });
   });
 

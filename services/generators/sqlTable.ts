@@ -23,7 +23,10 @@ export const generateSQLTable = (sheets: SheetData[]): string => {
     });
 
     pointsByPeriod.forEach((groupPoints, period) => {
-        const className = `${sheet.name}_PeriodAbs_${Math.abs(period)}`;
+        // Sanitize period for class name (e.g. 0.1 -> 0_1)
+        const safePeriod = Math.abs(period).toString().replace('.', '_');
+        const className = `${sheet.name}_PeriodAbs_${safePeriod}`;
+        
         if (processedClasses.has(className)) return; 
         processedClasses.add(className);
 
@@ -31,7 +34,16 @@ export const generateSQLTable = (sheets: SheetData[]): string => {
         sb.push(`    {`);
         groupPoints.forEach(p => {
              const csType = getCSharpType(p.Type);
-             sb.push(`        [SugarColumn(ColumnDescription = "${p.KeyName}")]`);
+             const safeKeyName = p.KeyName ? p.KeyName.replace(/"/g, '\\"') : "";
+             
+             let attrParams = `ColumnDescription = "${safeKeyName}"`;
+             
+             // Check if the raw Type string indicates an array (ends with []) to enable JSON storage
+             if (p.Type && p.Type.trim().endsWith('[]')) {
+                 attrParams += `, IsJson = true, ColumnDataType = "longtext"`;
+             }
+
+             sb.push(`        [SugarColumn(${attrParams})]`);
              sb.push(`        public ${csType} ${p.PropertyName} { get; set; }`);
         });
         sb.push(`    }`);

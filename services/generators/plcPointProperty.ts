@@ -1,8 +1,15 @@
-import { SheetData, PointDefinition } from '../../types';
+import { SheetData, PointDefinition, ByteOrder, StringByteOrder } from '../../types';
 import { cleanAddr, getCSharpType, getParseMethod, getReadMethod } from '../utils';
 import { optimizeRequests } from '../optimizer';
 
-export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number): string => {
+export const generatePLCPointProperty = (
+    sheets: SheetData[], 
+    maxModules: number, 
+    byteOrder: ByteOrder, 
+    stringByteOrder: StringByteOrder,
+    maxGap: number,
+    maxBatchSize: number
+): string => {
   const sb: string[] = [];
 
   sb.push(`using System;`);
@@ -18,17 +25,18 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`using System.Reflection;`);
   sb.push(`using System.Windows.Data;`);
   sb.push(`using System.Globalization;`);
-  sb.push(`using PropertyChanged;`); // For Fody
+  sb.push(`using CommunityToolkit.Mvvm.ComponentModel;`);
   sb.push(`using System.Windows;`);
   sb.push(``);
   sb.push(`namespace Core`);
   sb.push(`{`);
-  sb.push(`    [AddINotifyPropertyChangedInterface]`);
-  sb.push(`    public class PLCPointProperty : INotifyPropertyChanged`);
+  sb.push(`    // Numeric Byte Order: ${byteOrder}`);
+  sb.push(`    // String Byte Order:  ${stringByteOrder}`);
+  sb.push(`    // Optimization: Gap=${maxGap}, Batch=${maxBatchSize}`);
+  sb.push(`    public partial class PLCPointProperty : ObservableObject`);
   sb.push(`    {`);
   sb.push(`        public static PLCPointProperty Instance { get; } = new PLCPointProperty();`);
   sb.push(``);
-  sb.push(`        // 构造函数`);
   sb.push(`        private PLCPointProperty()`);
   sb.push(`        {`);
   sb.push(`            InitializePropertyMap();`);
@@ -36,12 +44,14 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`            _ = Task.Run(ProcessLogQueue);`);
   sb.push(`        }`);
   sb.push(``);
-  sb.push(`        // 频率控制 (Frequency)`);
   sb.push(`        private int _frequency = 1000;`);
   sb.push(`        public int Frequency`);
   sb.push(`        {`);
   sb.push(`            get => _frequency;`);
-  sb.push(`            set { _frequency = value; StartAllTasks(); }`);
+  sb.push(`            set`);
+  sb.push(`            {`);
+  sb.push(`                if (SetProperty(ref _frequency, value)) StartAllTasks();`);
+  sb.push(`            }`);
   sb.push(`        }`);
   sb.push(``);
   
@@ -53,8 +63,7 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`            get => _recordState;`);
   sb.push(`            set`);
   sb.push(`            {`);
-  sb.push(`                _recordState = value;`);
-  sb.push(`                IsRecording = (value == "Recording");`);
+  sb.push(`                if (SetProperty(ref _recordState, value)) IsRecording = (value == "Recording");`);
   sb.push(`            }`);
   sb.push(`        }`);
   sb.push(`        public bool IsRecording { get; private set; }`);
@@ -75,7 +84,6 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`                    if (lines.Count > 0)`);
   sb.push(`                    {`);
   sb.push(`                        string path = $"Log_{DateTime.Now:yyyyMMdd}.csv";`);
-  sb.push(`                        // 使用带BOM的UTF8编码，解决Excel打开中文乱码问题`);
   sb.push(`                        using (var sw = new StreamWriter(path, true, new System.Text.UTF8Encoding(true)))`);
   sb.push(`                        {`);
   sb.push(`                            foreach (var line in lines) sw.WriteLine(line);`);
@@ -94,14 +102,12 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(``);
   sb.push(`        private void InitializePropertyMap()`);
   sb.push(`        {`);
-  sb.push(`            // UI Mapping`);
   sheets.forEach(sheet => {
       sheet.points.forEach(p => {
           sb.push(`            _nameMapping.Add(nameof(Current${p.PropertyName}), "${p.PropertyName}_M");`);
       });
   });
   sb.push(``);
-  sb.push(`            // Log Metadata Initialization`);
   for(let m=1; m<=maxModules; m++) {
       sheets.forEach(sheet => {
           sheet.points.forEach(p => {
@@ -125,9 +131,8 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`                if (value < 1) value = 1;`);
   sb.push(`                if (value > MaxModuleCount) value = MaxModuleCount;`);
   sb.push(``);
-  sb.push(`                if (_currentModuleIndex != value)`);
+  sb.push(`                if (SetProperty(ref _currentModuleIndex, value))`);
   sb.push(`                {`);
-  sb.push(`                    _currentModuleIndex = value;`);
   sb.push(`                    UpdateAllPropertyCaches();`);
   sb.push(`                    NotifyAllCurrentProperties();`);
   sb.push(`                }`);
@@ -149,10 +154,7 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(``);
   sb.push(`        private void NotifyAllCurrentProperties()`);
   sb.push(`        {`);
-  sb.push(`            foreach (var key in _nameMapping.Keys)`);
-  sb.push(`            {`);
-  sb.push(`                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(key));`);
-  sb.push(`            }`);
+  sb.push(`            foreach (var key in _nameMapping.Keys) OnPropertyChanged(key);`);
   sb.push(`        }`);
   sb.push(``);
   sb.push(`        // ================== 3. 通用取值/赋值辅助方法 ==================`);
@@ -161,21 +163,19 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`            if (_reflectionCache.TryGetValue(uiPropertyName, out PropertyInfo info) && info != null)`);
   sb.push(`            {`);
   sb.push(`                var val = info.GetValue(this);`);
-  sb.push(`                if (val is T t) return t;`); // Direct cast check to support arrays
+  sb.push(`                if (val is T t) return t;`);
   sb.push(`                try { return (T)Convert.ChangeType(val, typeof(T)); } catch { return default(T); }`);
   sb.push(`            }`);
   sb.push(`            return default(T);`);
-  sb.push(`        }`);
-  sb.push(``);
-  sb.push(`        private void SetDynamicValue(string uiPropertyName, object value)`);
-  sb.push(`        {`);
-  sb.push(`            if (_reflectionCache.TryGetValue(uiPropertyName, out PropertyInfo info) && info != null)`);
-  sb.push(`            {`);
-  sb.push(`                info.SetValue(this, value);`);
-  sb.push(`            }`);
-  sb.push(`        }`);
-  sb.push(``);
-  
+  sb.push(`        }
+
+        private void SetDynamicValue(string uiPropertyName, object value)
+        {
+            if (_reflectionCache.TryGetValue(uiPropertyName, out PropertyInfo info) && info != null)
+            {
+                info.SetValue(this, value);
+            }
+        }`);
   sb.push(`        // ================== 4. 界面绑定属性 (CurrentX) ==================`);
   sheets.forEach(sheet => {
       sheet.points.forEach(p => {
@@ -188,103 +188,109 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
       });
   });
   sb.push(``);
-
-  sb.push(`        public event PropertyChangedEventHandler PropertyChanged;`);
-  sb.push(`        protected void OnPropertyChanged(string name)`);
-  sb.push(`        {`);
-  sb.push(`            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));`);
-  sb.push(``);
   
-  // Logging Hook
-  sb.push(`            // Check Logging`);
+  sb.push(`        protected override void OnPropertyChanged(PropertyChangedEventArgs e)`);
+  sb.push(`        {`);
+  sb.push(`            base.OnPropertyChanged(e);`);
+  sb.push(`            string name = e.PropertyName;`);
   sb.push(`            if (IsRecording && _logMetadata.TryGetValue(name, out var meta))`);
   sb.push(`            {`);
   sb.push(`                try {`);
   sb.push(`                    var val = meta.Info.GetValue(this);`);
-  // Handle Arrays in Log
   sb.push(`                    string valStr = val?.ToString();`);
   sb.push(`                    if (val is System.Collections.IEnumerable enumerable && !(val is string))`);
-  sb.push(`                    {`);
-  sb.push(`                         valStr = string.Join(";", System.Linq.Enumerable.Cast<object>(enumerable));`);
-  sb.push(`                    }`);
+  sb.push(`                        valStr = string.Join(";", System.Linq.Enumerable.Cast<object>(enumerable));`);
   sb.push(`                    string safeKey = (meta.KeyName != null && meta.KeyName.Contains(",")) ? $"\\"{meta.KeyName}\\"" : meta.KeyName;`);
   sb.push(`                    _logQueue.Enqueue($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff},{safeKey},{meta.Address},{meta.Type},{valStr}");`);
   sb.push(`                } catch {}`);
   sb.push(`            }`);
   sb.push(``);
-  
   sb.push(`            if (!name.EndsWith($"_M{CurrentModuleIndex}")) return;`);
   sb.push(`            var targetEntry = _reflectionCache.FirstOrDefault(x => x.Value != null && x.Value.Name == name);`);
-  sb.push(`            if (targetEntry.Key != null) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(targetEntry.Key));`);
+  sb.push(`            if (targetEntry.Key != null) OnPropertyChanged(targetEntry.Key);`);
   sb.push(`        }`);
   sb.push(``);
 
-  sb.push(`        #region 辅助解析方法 (For Batch & Single)`);
+  // ================== PARSING LOGIC GENERATION (Endiannness) ==================
+  sb.push(`        #region 辅助解析方法 (Numeric: ${byteOrder}, String: ${stringByteOrder})`);
   sb.push(`        private bool ParseBool(string val) => bool.TryParse(val, out var b) ? b : false;`);
-  sb.push(`        private short ParseShort(string val) => short.TryParse(val, out var s) ? s : (short)0;`);
-  sb.push(`        private int ParseInt(string val) => int.TryParse(val, out var i) ? i : 0;`);
-  sb.push(`        private float ParseFloat(string val) => float.TryParse(val, out var f) ? f : 0f;`);
-  sb.push(``);
-  // Array Parsing from String (CSV style return from ReadRegisters)
-  sb.push(`        private short[] ParseShortArray(string raw)`);
-  sb.push(`        {`);
-  sb.push(`            var us = ParseRegisters(raw);`);
-  sb.push(`            var res = new short[us.Length];`);
-  sb.push(`            for(int i=0; i<us.Length; i++) res[i] = (short)us[i];`);
-  sb.push(`            return res;`);
-  sb.push(`        }`);
-  sb.push(`        private int[] ParseIntArray(string raw)`);
-  sb.push(`        {`);
-  sb.push(`            var us = ParseRegisters(raw);`);
-  sb.push(`            var res = new int[us.Length / 2];`);
-  sb.push(`            for(int i=0; i<res.Length; i++) res[i] = GetInt(us, i*2);`);
-  sb.push(`            return res;`);
-  sb.push(`        }`);
-  sb.push(`        private float[] ParseFloatArray(string raw)`);
-  sb.push(`        {`);
-  sb.push(`            var us = ParseRegisters(raw);`);
-  sb.push(`            var res = new float[us.Length / 2];`);
-  sb.push(`            for(int i=0; i<res.Length; i++) res[i] = GetFloat(us, i*2);`);
-  sb.push(`            return res;`);
-  sb.push(`        }`);
   sb.push(``);
   
-  sb.push(`        // 批量读取辅助`);
-  sb.push(`        private ushort[] ParseRegisters(string raw)`);
+  // -- GET SHORT --
+  sb.push(`        private short GetShort(ushort[] data, int offset)`);
   sb.push(`        {`);
-  sb.push(`            if (string.IsNullOrWhiteSpace(raw)) return new ushort[0];`);
-  sb.push(`            var parts = raw.Split(new[] { ',', ' ', '[', ']' }, StringSplitOptions.RemoveEmptyEntries);`);
-  sb.push(`            var list = new List<ushort>();`);
-  sb.push(`            foreach (var p in parts) if (ushort.TryParse(p, out var v)) list.Add(v);`);
-  sb.push(`            return list.ToArray();`);
-  sb.push(``);
+  sb.push(`            if (offset >= data.Length) return 0;`);
+  if (byteOrder === 'BADC' || byteOrder === 'DCBA') {
+      // Byte Swap needed within the register
+      sb.push(`            ushort v = data[offset];`);
+      sb.push(`            return (short)((v >> 8) | (v << 8));`);
+  } else {
+      // ABCD or CDAB (No byte swap within register)
+      sb.push(`            return (short)data[offset];`);
+  }
   sb.push(`        }`);
   sb.push(``);
-  sb.push(`        private bool[] ParseCoils(string raw)`);
+
+  // -- GET INT (32-bit) --
+  sb.push(`        private int GetInt(ushort[] data, int offset)`);
   sb.push(`        {`);
-  sb.push(`            if (string.IsNullOrWhiteSpace(raw)) return new bool[0];`);
-  sb.push(`            var parts = raw.Split(new[] { ',', ' ', '[', ']' }, StringSplitOptions.RemoveEmptyEntries);`);
-  sb.push(`            var list = new List<bool>();`);
-  sb.push(`            foreach (var p in parts)`);
-  sb.push(`            {`);
-  sb.push(`                 if (bool.TryParse(p, out var b)) list.Add(b);`);
-  sb.push(`                 else if (int.TryParse(p, out var i)) list.Add(i != 0);`);
-  sb.push(`            }`);
-  sb.push(`            return list.ToArray();`);
+  sb.push(`            if (offset + 1 >= data.Length) return 0;`);
+  // Map words based on endianness
+  if (byteOrder === 'ABCD') {
+      sb.push(`            // ABCD: Big Endian`);
+      sb.push(`            return (int)((data[offset] << 16) | data[offset + 1]);`);
+  } else if (byteOrder === 'CDAB') {
+      sb.push(`            // CDAB: Little Endian Word Swap`);
+      sb.push(`            return (int)((data[offset + 1] << 16) | data[offset]);`);
+  } else if (byteOrder === 'BADC') {
+      sb.push(`            // BADC: Big Endian Byte Swap`);
+      sb.push(`            ushort w1 = (ushort)((data[offset] >> 8) | (data[offset] << 8));`);
+      sb.push(`            ushort w2 = (ushort)((data[offset + 1] >> 8) | (data[offset + 1] << 8));`);
+      sb.push(`            return (int)((w1 << 16) | w2);`);
+  } else { // DCBA
+      sb.push(`            // DCBA: Little Endian`);
+      sb.push(`            ushort w1 = (ushort)((data[offset] >> 8) | (data[offset] << 8));`);
+      sb.push(`            ushort w2 = (ushort)((data[offset + 1] >> 8) | (data[offset + 1] << 8));`);
+      sb.push(`            return (int)((w2 << 16) | w1);`);
+  }
   sb.push(`        }`);
   sb.push(``);
-  sb.push(`        private short GetShort(ushort[] data, int offset) => (offset < data.Length) ? (short)data[offset] : (short)0;`);
-  sb.push(`        private int GetInt(ushort[] data, int offset) => (offset + 1 < data.Length) ? (int)((data[offset] << 16) | data[offset + 1]) : 0;`);
+
+  // -- GET FLOAT --
   sb.push(`        private float GetFloat(ushort[] data, int offset)`);
   sb.push(`        {`);
   sb.push(`            if (offset + 1 >= data.Length) return 0f;`);
-  sb.push(`            byte[] bytes = new byte[4];`);
-  sb.push(`            byte[] high = BitConverter.GetBytes(data[offset]);`);
-  sb.push(`            byte[] low = BitConverter.GetBytes(data[offset + 1]);`);
-  sb.push(`            Buffer.BlockCopy(high, 0, bytes, 2, 2);`);
-  sb.push(`            Buffer.BlockCopy(low, 0, bytes, 0, 2);`);
+  
+  if (byteOrder === 'ABCD') {
+      sb.push(`            byte[] bytes = new byte[4];`);
+      sb.push(`            bytes[0] = (byte)(data[offset + 1] & 0xFF);`);
+      sb.push(`            bytes[1] = (byte)(data[offset + 1] >> 8);`);
+      sb.push(`            bytes[2] = (byte)(data[offset] & 0xFF);`);
+      sb.push(`            bytes[3] = (byte)(data[offset] >> 8);`);
+  } else if (byteOrder === 'CDAB') {
+      sb.push(`            byte[] bytes = new byte[4];`);
+      sb.push(`            bytes[0] = (byte)(data[offset] & 0xFF);`);
+      sb.push(`            bytes[1] = (byte)(data[offset] >> 8);`);
+      sb.push(`            bytes[2] = (byte)(data[offset + 1] & 0xFF);`);
+      sb.push(`            bytes[3] = (byte)(data[offset + 1] >> 8);`);
+  } else if (byteOrder === 'BADC') {
+      sb.push(`            byte[] bytes = new byte[4];`);
+      sb.push(`            bytes[0] = (byte)(data[offset + 1] >> 8);`);
+      sb.push(`            bytes[1] = (byte)(data[offset + 1] & 0xFF);`);
+      sb.push(`            bytes[2] = (byte)(data[offset] >> 8);`);
+      sb.push(`            bytes[3] = (byte)(data[offset + 1] & 0xFF);`);
+  } else { // DCBA
+      sb.push(`            byte[] bytes = new byte[4];`);
+      sb.push(`            bytes[0] = (byte)(data[offset] >> 8);`);
+      sb.push(`            bytes[1] = (byte)(data[offset] & 0xFF);`);
+      sb.push(`            bytes[2] = (byte)(data[offset + 1] >> 8);`);
+      sb.push(`            bytes[3] = (byte)(data[offset + 1] & 0xFF);`);
+  }
+  
   sb.push(`            return BitConverter.ToSingle(bytes, 0);`);
   sb.push(`        }`);
+  
+  // -- STRING --
   sb.push(`        private string GetString(ushort[] data, int offset, int length)`);
   sb.push(`        {`);
   sb.push(`            if (offset + length > data.Length) return string.Empty;`);
@@ -292,13 +298,21 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`            for (int i = 0; i < length; i++)`);
   sb.push(`            {`);
   sb.push(`                ushort val = data[offset + i];`);
-  sb.push(`                bytes.Add((byte)(val & 0xFF));`);
-  sb.push(`                bytes.Add((byte)(val >> 8));`);
+  
+  if (stringByteOrder === 'BADC') {
+      sb.push(`                bytes.Add((byte)(val & 0xFF));`);
+      sb.push(`                bytes.Add((byte)(val >> 8));`);
+  } else {
+      sb.push(`                bytes.Add((byte)(val >> 8));`);
+      sb.push(`                bytes.Add((byte)(val & 0xFF));`);
+  }
+  
   sb.push(`            }`);
   sb.push(`            return Encoding.ASCII.GetString(bytes.ToArray()).Trim('\\0');`);
   sb.push(`        }`);
   sb.push(``);
-  // Array Extraction Methods
+
+  // -- ARRAY GETTERS --
   sb.push(`        private short[] GetShortArray(ushort[] data, int offset, int len)`);
   sb.push(`        {`);
   sb.push(`            var res = new short[len];`);
@@ -317,25 +331,63 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`            for(int i=0; i<len; i++) res[i] = GetFloat(data, offset + i * 2);`);
   sb.push(`            return res;`);
   sb.push(`        }`);
+  sb.push(``);
+
+  // -- PARSE WRAPPERS (Used by RunPeriodicLog) --
+  sb.push(`        private ushort[] ParseRegisters(string raw)`);
+  sb.push(`        {`);
+  sb.push(`            if (string.IsNullOrWhiteSpace(raw)) return new ushort[0];`);
+  sb.push(`            var parts = raw.Split(new[] { ',', ' ', '[', ']' }, StringSplitOptions.RemoveEmptyEntries);`);
+  sb.push(`            var list = new List<ushort>();`);
+  sb.push(`            foreach (var p in parts) if (ushort.TryParse(p, out var v)) list.Add(v);`);
+  sb.push(`            return list.ToArray();`);
+  sb.push(`        }`);
+  sb.push(``);
+  // Wrappers to convert Raw Registers -> Type using internal endianness logic
+  sb.push(`        private short ParseShort(string rawRegs) => GetShort(ParseRegisters(rawRegs), 0);`);
+  sb.push(`        private int ParseInt(string rawRegs) => GetInt(ParseRegisters(rawRegs), 0);`);
+  sb.push(`        private float ParseFloat(string rawRegs) => GetFloat(ParseRegisters(rawRegs), 0);`);
+  sb.push(``);
+  sb.push(`        private short[] ParseShortArray(string rawRegs, int len) => GetShortArray(ParseRegisters(rawRegs), 0, len);`);
+  sb.push(`        private int[] ParseIntArray(string rawRegs, int len) => GetIntArray(ParseRegisters(rawRegs), 0, len);`);
+  sb.push(`        private float[] ParseFloatArray(string rawRegs, int len) => GetFloatArray(ParseRegisters(rawRegs), 0, len);`);
+  sb.push(``);
+  sb.push(`        private bool[] ParseCoils(string raw)`);
+  sb.push(`        {`);
+  sb.push(`            if (string.IsNullOrWhiteSpace(raw)) return new bool[0];`);
+  sb.push(`            var parts = raw.Split(new[] { ',', ' ', '[', ']' }, StringSplitOptions.RemoveEmptyEntries);`);
+  sb.push(`            var list = new List<bool>();`);
+  sb.push(`            foreach (var p in parts)`);
+  sb.push(`            {`);
+  sb.push(`                 if (bool.TryParse(p, out var b)) list.Add(b);`);
+  sb.push(`                 else if (int.TryParse(p, out var i)) list.Add(i != 0);`);
+  sb.push(`            }`);
+  sb.push(`            return list.ToArray();`);
+  sb.push(`        }`);
   sb.push(`        #endregion`);
   sb.push(``);
 
-  sb.push(`        #region 底层属性 (Mx) - Fody Auto Properties`);
+  sb.push(`        #region 底层属性 (Mx)`);
   for (let m = 1; m <= maxModules; m++) {
     sheets.forEach(sheet => {
       sheet.points.forEach(p => {
         const propName = `${p.PropertyName}_M${m}`;
+        const fieldName = `_${propName}`;
         const csType = getCSharpType(p.Type);
         
-        // --- Fix: Initialize arrays ---
         let init = "";
         if (p.Type.trim().toLowerCase().endsWith("[]")) {
              const arrLen = p.Length || 5; 
              const baseType = getCSharpType(p.Type).replace("[]","");
-             init = ` = new ${baseType}[${arrLen}];`;
+             init = ` = new ${baseType}[${arrLen}]`;
         }
         
-        sb.push(`        public ${csType} ${propName} { get; set; }${init}`);
+        sb.push(`        private ${csType} ${fieldName}${init};`);
+        sb.push(`        public ${csType} ${propName}`);
+        sb.push(`        {`);
+        sb.push(`            get => ${fieldName};`);
+        sb.push(`            set => SetProperty(ref ${fieldName}, value);`);
+        sb.push(`        }`);
       });
     });
   }
@@ -354,23 +406,7 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`        }`);
   sb.push(``);
   
-  // Helper: Monitor Value (Single)
-  sb.push(`        private async Task MonitorValue<T>(CancellationToken token, IModbusService plc, Func<IModbusService, T> readFunc, Action<T> setProperty)`);
-  sb.push(`        {`);
-  sb.push(`            while (!token.IsCancellationRequested)`);
-  sb.push(`            {`);
-  sb.push(`                try`);
-  sb.push(`                {`);
-  sb.push(`                    await Task.Delay(Frequency, token);`);
-  sb.push(`                    if (plc == null || !plc.IsConnected) continue;`);
-  sb.push(`                    setProperty(readFunc(plc));`);
-  sb.push(`                }`);
-  sb.push(`                catch {}`);
-  sb.push(`            }`);
-  sb.push(`        }`);
-  sb.push(``);
-
-  // Helper: Batch Monitor Registers
+  // Batch Monitor Registers
   sb.push(`        private async Task BatchMonitorRegisters(CancellationToken token, IModbusService plc, int start, int length, Action<ushort[]> mapData)`);
   sb.push(`        {`);
   sb.push(`            while (!token.IsCancellationRequested)`);
@@ -388,7 +424,6 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`        }`);
   sb.push(``);
 
-  // Helper: Batch Monitor Coils
   sb.push(`        private async Task BatchMonitorCoils(CancellationToken token, IModbusService plc, int start, int length, Action<bool[]> mapData)`);
   sb.push(`        {`);
   sb.push(`            while (!token.IsCancellationRequested)`);
@@ -406,7 +441,7 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`        }`);
   sb.push(``);
 
-  // Helper: Periodic Log
+  // Periodic Log: Uses Action<T, IModbusService>
   sb.push(`        private async Task RunPeriodicLog<T>(CancellationToken token, int period, IModbusService plc, Func<T> createEntity, Action<T, IModbusService> fillEntity, Func<T, Task> saveEntity)`);
   sb.push(`        {`);
   sb.push(`            while (!token.IsCancellationRequested)`);
@@ -424,7 +459,31 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`        }`);
   sb.push(``);
 
-  // Helper: Handshake Log
+  // New: RunChangeLog for Period < 1.0 (Store only on change)
+  sb.push(`        private async Task RunChangeLog<T>(CancellationToken token, int period, IModbusService plc, Func<T> createEntity, Action<T, IModbusService> fillEntity, Func<T, Task> saveEntity, Func<T, T, bool> isDifferent)`);
+  sb.push(`        {`);
+  sb.push(`            T lastEntity = default;`);
+  sb.push(`            while (!token.IsCancellationRequested)`);
+  sb.push(`            {`);
+  sb.push(`                try`);
+  sb.push(`                {`);
+  sb.push(`                    await Task.Delay(period, token);`);
+  sb.push(`                    if (plc == null || !plc.IsConnected) continue;`);
+  sb.push(`                    var entity = createEntity();`);
+  sb.push(`                    fillEntity(entity, plc);`);
+  sb.push(``);
+  sb.push(`                    if (lastEntity == null || isDifferent(entity, lastEntity))`);
+  sb.push(`                    {`);
+  sb.push(`                        await saveEntity(entity);`);
+  sb.push(`                        lastEntity = entity;`);
+  sb.push(`                    }`);
+  sb.push(`                }`);
+  sb.push(`                catch (Exception ex) { Console.WriteLine(ex.Message); }`);
+  sb.push(`            }`);
+  sb.push(`        }`);
+  sb.push(``);
+
+  // Handshake Log
   sb.push(`        private async Task RunHandshakeLog<T>(CancellationToken token, int period, IModbusService plc, string triggerAddr, string returnAddr, Func<T> createEntity, Action<T, IModbusService> fillEntity, Func<T, Task> saveEntity)`);
   sb.push(`        {`);
   sb.push(`            while (!token.IsCancellationRequested)`);
@@ -433,9 +492,9 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`                {`);
   sb.push(`                    await Task.Delay(period, token);`);
   sb.push(`                    if (plc == null || !plc.IsConnected) continue;`);
-  sb.push(``);
+  sb.push(`                    // Use ReadRegisters for trigger check to avoid byte order issues`);
   sb.push(`                    string tStr = plc.ReadRegisters(triggerAddr, 1);`);
-  sb.push(`                    if (!int.TryParse(tStr, out int tVal) || tVal != 11) continue;`);
+  sb.push(`                    if (ParseInt(tStr) != 11) continue;`); // trigger value 11
   sb.push(``);
   sb.push(`                    var entity = createEntity();`);
   sb.push(`                    fillEntity(entity, plc);`);
@@ -447,7 +506,7 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`                    while (sw.ElapsedMilliseconds < 5000)`);
   sb.push(`                    {`);
   sb.push(`                        string rStr = plc.ReadRegisters(returnAddr, 1);`);
-  sb.push(`                        if (int.TryParse(rStr, out int rInt) && rInt == 0) break;`);
+  sb.push(`                        if (ParseInt(rStr) == 0) break;`);
   sb.push(`                        await Task.Delay(100, token);`);
   sb.push(`                    }`);
   sb.push(``);
@@ -455,7 +514,7 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`                    while (sw.ElapsedMilliseconds < 5000)`);
   sb.push(`                    {`);
   sb.push(`                        string tEndStr = plc.ReadRegisters(triggerAddr, 1);`);
-  sb.push(`                        if (int.TryParse(tEndStr, out int tEndInt) && tEndInt == 0) break;`);
+  sb.push(`                        if (ParseInt(tEndStr) == 0) break;`);
   sb.push(`                        await Task.Delay(100, token);`);
   sb.push(`                    }`);
   sb.push(`                }`);
@@ -473,13 +532,11 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`            if (Frequency <= 0) return;`);
   sb.push(``);
   
-  // 1. Generate Monitor Tasks (Optimized)
+  // 1. Generate Monitor Tasks (Existing Logic)
   for (let m = 1; m <= maxModules; m++) {
       sheets.forEach(sheet => {
           const plcName = `Global._${m}${sheet.name}PLCModbus`;
           const allPoints = sheet.points;
-
-          // -- Optimize Coils (Bool) --
           const coilTags = allPoints.filter(p => p.Type.toLowerCase() === 'bool').map(p => ({
               Name: `${p.PropertyName}_M${m}`,
               Address: parseInt(cleanAddr(p.ValueAddress)),
@@ -487,7 +544,7 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
               Type: 'bool',
               ArrayLen: 1
           }));
-          const coilBlocks = optimizeRequests(coilTags);
+          const coilBlocks = optimizeRequests(coilTags, maxGap, maxBatchSize);
 
           coilBlocks.forEach((block, idx) => {
                const taskName = `${sheet.name}_M${m}_Coils_${idx}`;
@@ -499,7 +556,6 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
                sb.push(`            }));`);
           });
 
-          // -- Optimize Registers (Short, Int, Float, String, Arrays) --
           const regTags = allPoints.filter(p => !['bool'].includes(p.Type.toLowerCase())).map(p => {
               const lowerType = p.Type.toLowerCase();
               let regCount = 1;
@@ -507,33 +563,29 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
 
               if (lowerType === 'int' || lowerType === 'float') regCount = 2;
               if (lowerType === 'string') regCount = p.Length || 10;
-              
-              // Handle Arrays
               if (lowerType.endsWith('[]')) {
-                  arrayLen = p.Length || 5; // Default array length if not specified
+                  arrayLen = p.Length || 5; 
                   const baseType = lowerType.replace('[]', '');
                   let elementRegs = 1;
                   if (baseType === 'int' || baseType === 'float') elementRegs = 2;
                   regCount = arrayLen * elementRegs;
               }
-
               return {
                   Name: `${p.PropertyName}_M${m}`,
                   Address: parseInt(cleanAddr(p.ValueAddress)),
-                  Length: regCount, // Total registers to read
+                  Length: regCount,
                   Type: lowerType,
                   ArrayLen: arrayLen
               };
           });
 
-          const regBlocks = optimizeRequests(regTags);
+          const regBlocks = optimizeRequests(regTags, maxGap, maxBatchSize);
 
           regBlocks.forEach((block, idx) => {
               const taskName = `${sheet.name}_M${m}_Regs_${idx}`;
               sb.push(`            StartTask("${taskName}", t => BatchMonitorRegisters(t, ${plcName}, ${block.StartAddress}, ${block.Length}, data => {`);
               block.IncludedTags.forEach(tag => {
                   const offset = tag.Address - block.StartAddress;
-                  // Handle different types
                   if (tag.Type === 'short') {
                        sb.push(`                this.${tag.Name} = GetShort(data, ${offset});`);
                   } else if (tag.Type === 'int') {
@@ -543,7 +595,6 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
                   } else if (tag.Type === 'string') {
                        sb.push(`                this.${tag.Name} = GetString(data, ${offset}, ${tag.Length});`);
                   } else if (tag.Type.endsWith('[]')) {
-                       // Array extraction
                        if (tag.Type.includes('short')) {
                            sb.push(`                this.${tag.Name} = GetShortArray(data, ${offset}, ${tag.ArrayLen});`);
                        } else if (tag.Type.includes('int')) {
@@ -573,38 +624,45 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
       });
 
       pointsByPeriod.forEach((groupPoints, period) => {
-          const tableName = `${sheet.name}_PeriodAbs_${Math.abs(period)}`;
+          const safePeriod = Math.abs(period).toString().replace('.', '_');
+          const tableName = `${sheet.name}_PeriodAbs_${safePeriod}`;
           const repoName = `Global.repo_${tableName}`;
 
           if (period > 0) {
-              const taskName = `${sheet.name}_M${m}_Period_${period}`;
-              sb.push(`            StartTask("${taskName}", t => RunPeriodicLog(t, ${period}, ${plcName},`);
-              sb.push(`                () => new ${tableName} { ModuleNum = ${m} },`);
-              sb.push(`                (e, plc) => {`);
-              groupPoints.forEach(p => {
-                  const addr = cleanAddr(p.ValueAddress);
-                  const readMethod = getReadMethod(p.Type);
-                  const parseMethod = getParseMethod(p.Type);
-                  let readLen = p.Length;
-                  // Calculate correct read length for arrays (Modbus registers)
-                  if (p.Type.toLowerCase().endsWith('[]')) {
-                      const base = p.Type.toLowerCase().replace('[]', '');
-                      const count = p.Length || 1;
-                      readLen = (base === 'int' || base === 'float') ? count * 2 : count;
-                  }
+              // CASE: High Frequency Change Log (0 < P < 1)
+              if (period < 1) {
+                  const frequency = Math.floor(period * 1000);
+                  const taskName = `${sheet.name}_M${m}_ChangeLog_${safePeriod}`;
+                  
+                  // Generate Comparison Logic
+                  const compareLogic = groupPoints.map(p => {
+                     if (p.Type.endsWith('[]')) {
+                         const baseType = getCSharpType(p.Type).replace('[]', '');
+                         return `!Enumerable.SequenceEqual(a.${p.PropertyName} ?? new ${baseType}[0], b.${p.PropertyName} ?? new ${baseType}[0])`;
+                     }
+                     return `a.${p.PropertyName} != b.${p.PropertyName}`;
+                  }).join(' || ');
 
-                  if(p.Type.toLowerCase() === 'string') {
-                      sb.push(`                    e.${p.PropertyName} = plc.${readMethod}("${addr}", ${p.Length});`);
-                  } else if (p.Type.toLowerCase().endsWith('[]')) {
-                      // Array handling: ParseXArray(plc.ReadRegisters(...))
-                       sb.push(`                    e.${p.PropertyName} = ${parseMethod}(plc.${readMethod}("${addr}", ${readLen}));`);
-                  } else {
-                      sb.push(`                    e.${p.PropertyName} = ${parseMethod}(plc.${readMethod}("${addr}", ${p.Length}));`);
-                  }
-              });
-              sb.push(`                },`);
-              sb.push(`                e => ${repoName}.InsertAsync(e)`);
-              sb.push(`            ));`);
+                  sb.push(`            StartTask("${taskName}", t => RunChangeLog(t, ${frequency}, ${plcName},`);
+                  sb.push(`                () => new ${tableName} { ModuleNum = ${m} },`);
+                  sb.push(`                (e, plc) => {`);
+                  generateReadLogic(sb, groupPoints); // Helper function extracted below or inline logic
+                  sb.push(`                },`);
+                  sb.push(`                e => ${repoName}.InsertAsync(e),`);
+                  sb.push(`                (a, b) => ${compareLogic}`); // isDifferent lambda
+                  sb.push(`            ));`);
+              } 
+              // CASE: Standard Periodic Log (P >= 1)
+              else {
+                  const taskName = `${sheet.name}_M${m}_Period_${safePeriod}`;
+                  sb.push(`            StartTask("${taskName}", t => RunPeriodicLog(t, ${period}, ${plcName},`);
+                  sb.push(`                () => new ${tableName} { ModuleNum = ${m} },`);
+                  sb.push(`                (e, plc) => {`);
+                  generateReadLogic(sb, groupPoints);
+                  sb.push(`                },`);
+                  sb.push(`                e => ${repoName}.InsertAsync(e)`);
+                  sb.push(`            ));`);
+              }
 
           } else {
               // Handshake Log
@@ -623,25 +681,7 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
                   sb.push(`            StartTask("${taskName}", t => RunHandshakeLog(t, ${absPeriod}, ${plcName}, "${triggerAddr}", "${returnAddr}",`);
                   sb.push(`                () => new ${tableName} { ModuleNum = ${m} },`);
                   sb.push(`                (e, plc) => {`);
-                  tPoints.forEach(p => {
-                      const addr = cleanAddr(p.ValueAddress);
-                      const readMethod = getReadMethod(p.Type);
-                      const parseMethod = getParseMethod(p.Type);
-                      let readLen = p.Length;
-                      if (p.Type.toLowerCase().endsWith('[]')) {
-                          const base = p.Type.toLowerCase().replace('[]', '');
-                          const count = p.Length || 1;
-                          readLen = (base === 'int' || base === 'float') ? count * 2 : count;
-                      }
-
-                      if(p.Type.toLowerCase() === 'string') {
-                          sb.push(`                    e.${p.PropertyName} = plc.${readMethod}("${addr}", ${p.Length});`);
-                      } else if (p.Type.toLowerCase().endsWith('[]')) {
-                          sb.push(`                    e.${p.PropertyName} = ${parseMethod}(plc.${readMethod}("${addr}", ${readLen}));`);
-                      } else {
-                          sb.push(`                    e.${p.PropertyName} = ${parseMethod}(plc.${readMethod}("${addr}", ${p.Length}));`);
-                      }
-                  });
+                  generateReadLogic(sb, tPoints);
                   sb.push(`                },`);
                   sb.push(`                e => ${repoName}.InsertAsync(e)`);
                   sb.push(`            ));`);
@@ -654,7 +694,6 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`        }`);
   sb.push(`    }`);
   
-  // --- Array Converter Class ---
   sb.push(``);
   sb.push(`    public class ArrayToStringConverter : IValueConverter`);
   sb.push(`    {`);
@@ -678,3 +717,37 @@ export const generatePLCPointProperty = (sheets: SheetData[], maxModules: number
   sb.push(`}`);
   return sb.join('\n');
 };
+
+// Helper function to deduplicate reading logic in the template
+function generateReadLogic(sb: string[], points: PointDefinition[]) {
+    points.forEach(p => {
+        const addr = cleanAddr(p.ValueAddress);
+        let readLen = 1;
+        const t = p.Type.toLowerCase();
+        if (t === 'int' || t === 'float') readLen = 2;
+        else if (t === 'string') readLen = p.Length || 10;
+        else if (t.endsWith('[]')) {
+            const count = p.Length || 1;
+            if (t.includes('int') || t.includes('float')) readLen = count * 2;
+            else readLen = count;
+        }
+
+        if (t === 'bool') {
+            sb.push(`                    e.${p.PropertyName} = ParseBool(plc.ReadCoils("${addr}", 1));`);
+        } else if (t.endsWith('[]')) {
+             let parseCall = "ParseShortArray";
+             if (t.includes('int')) parseCall = "ParseIntArray";
+             if (t.includes('float')) parseCall = "ParseFloatArray";
+             sb.push(`                    e.${p.PropertyName} = ${parseCall}(plc.ReadRegisters("${addr}", ${readLen}), ${p.Length});`);
+        } else {
+            let parseCall = "ParseShort";
+            if (t === 'int') parseCall = "ParseInt";
+            if (t === 'float') parseCall = "ParseFloat";
+            if (t === 'string') {
+                 sb.push(`                    e.${p.PropertyName} = GetString(ParseRegisters(plc.ReadRegisters("${addr}", ${readLen})), 0, ${readLen});`);
+            } else {
+                 sb.push(`                    e.${p.PropertyName} = ${parseCall}(plc.ReadRegisters("${addr}", ${readLen}));`);
+            }
+        }
+    });
+}

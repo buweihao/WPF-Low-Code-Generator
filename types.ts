@@ -18,14 +18,21 @@ export interface PointDefinition {
 export interface SheetData {
   name: string;
   points: PointDefinition[];
-  // deviceInfo removed because mapping is now Sheet + ModuleIndex -> DeviceConfig
 }
+
+export type ByteOrder = 'ABCD' | 'CDAB' | 'BADC' | 'DCBA';
+export type StringByteOrder = 'ABCD' | 'BADC'; // Only allow byte swaps for strings, not word swaps
 
 export interface AppState {
   maxModules: number;
+  byteOrder: ByteOrder;
+  stringByteOrder: StringByteOrder;
+  maxGap: number;        // Max address gap to merge
+  maxBatchSize: number;  // Max registers per request
   sheets: SheetData[];
   devices: DeviceConfig[];
   isProcessing: boolean;
   error: string | null;
   logs: string[];
+  showReadme: boolean;   // UI state for Readme modal
 }
